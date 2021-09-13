@@ -3696,6 +3696,46 @@ TEST(KeepAliveTest, ReadTimeout) {
   ASSERT_FALSE(svr.is_running());
 }
 
+TEST(KeepAliveTest, KeepAliveTimeout) {
+  Server svr;
+
+  svr.set_keep_alive_timeout(3);
+
+  svr.Get("/hi", [](const httplib::Request &, httplib::Response &res) {
+    res.set_content("Hello World!", "text/plain");
+  });
+
+  // auto a = std::async(std::launch::async, [&]{ svr.listen(HOST, PORT); });
+  auto t = std::thread([&]{ svr.listen(HOST, PORT); });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  Client cli(HOST, PORT);
+  cli.set_keep_alive(true);
+
+  auto ret = cli.Get("/hi");
+  EXPECT_TRUE(ret);
+  if (ret) {
+    EXPECT_EQ(200, ret->status);
+  }
+
+  std::this_thread::sleep_for(std::chrono::seconds(5));
+
+  ret = cli.Get("/hi");
+  EXPECT_TRUE(ret);
+  if (ret) {
+    EXPECT_EQ(200, ret->status);
+  }
+
+  std::cout << "svr.stop()" << std::endl;
+  svr.stop();
+  // std::cout << "a.wait()" << std::endl;
+  // a.wait();
+  std::cout << "t.join()" << std::endl;
+  t.join();
+  std::cout << "done..." << std::endl;
+}
+
 TEST(ClientProblemDetectionTest, ContentProvider) {
   Server svr;
 
