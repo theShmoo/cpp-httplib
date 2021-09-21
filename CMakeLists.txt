@@ -156,6 +156,16 @@ endif()
 include(GNUInstallDirs)
 
 if(HTTPLIB_COMPILE)
+	# Used outside of this if-else
+	set(_INTERFACE_OR_PUBLIC PUBLIC)
+	# Brings in the Python3_EXECUTABLE path we can use.
+	find_package(Python3 REQUIRED)
+
+	# split.py puts output in "out"
+	set(_httplib_build_includedir "${CMAKE_CURRENT_BINARY_DIR}/out")
+	# the build file
+	set(_httplib_out_cc_file "${_httplib_build_includedir}/httplib.cc")
+
 	# Put the split script into the build dir
 	configure_file(split.py "${CMAKE_CURRENT_BINARY_DIR}/split.py"
 		COPYONLY
@@ -165,24 +175,21 @@ if(HTTPLIB_COMPILE)
 		COPYONLY
 	)
 
-	# Used outside of this if-else
-	set(_INTERFACE_OR_PUBLIC PUBLIC)
-	# Brings in the Python3_EXECUTABLE path we can use.
-	find_package(Python3 REQUIRED)
-	# Actually split the file
-	# Keeps the output in the build dir to not pollute the main dir
-	execute_process(COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_BINARY_DIR}/split.py"
-		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-		ERROR_VARIABLE _httplib_split_error
-	)
-	if(_httplib_split_error)
-		message(FATAL_ERROR "Failed when trying to split Cpp-httplib with the Python script.\n${_httplib_split_error}")
+	# if the file not yet exists
+	if(NOT EXISTS ${_httplib_out_cc_file})
+		# Actually split the file
+		# Keeps the output in the build dir to not pollute the main dir
+		execute_process(COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_BINARY_DIR}/split.py"
+			WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+			ERROR_VARIABLE _httplib_split_error
+		)
+		if(_httplib_split_error)
+			message(FATAL_ERROR "Failed when trying to split Cpp-httplib with the Python script.\n${_httplib_split_error}")
+		endif()
 	endif()
 
-	# split.py puts output in "out"
-	set(_httplib_build_includedir "${CMAKE_CURRENT_BINARY_DIR}/out")
 	# This will automatically be either static or shared based on the value of BUILD_SHARED_LIBS
-	add_library(${PROJECT_NAME} "${_httplib_build_includedir}/httplib.cc")
+	add_library(${PROJECT_NAME} "${_httplib_out_cc_file}")
 	target_sources(${PROJECT_NAME}
 		PUBLIC
 			$<BUILD_INTERFACE:${_httplib_build_includedir}/httplib.h>
