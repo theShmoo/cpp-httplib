@@ -259,7 +259,7 @@ namespace detail {
 
 template <class T, class... Args>
 typename std::enable_if<!std::is_array<T>::value, std::unique_ptr<T>>::type
-make_unique(Args &&... args) {
+make_unique(Args &&...args) {
   return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
 }
 
@@ -492,7 +492,7 @@ public:
   virtual socket_t socket() const = 0;
 
   template <typename... Args>
-  ssize_t write_format(const char *fmt, const Args &... args);
+  ssize_t write_format(const char *fmt, const Args &...args);
   ssize_t write(const char *ptr);
   ssize_t write(const std::string &s);
 };
@@ -622,7 +622,7 @@ public:
   Server &Options(const std::string &pattern, Handler handler);
 
   bool set_base_dir(const std::string &dir,
-                    const std::string &mount_point = nullptr);
+                    const std::string &mount_point = std::string());
   bool set_mount_point(const std::string &mount_point, const std::string &dir,
                        Headers headers = Headers());
   bool remove_mount_point(const std::string &mount_point);
@@ -1161,6 +1161,8 @@ public:
                   const std::string &client_cert_path,
                   const std::string &client_key_path);
 
+  Client(Client &&) = default;
+
   ~Client();
 
   bool is_valid() const;
@@ -1473,7 +1475,7 @@ inline T Response::get_header_value(const char *key, size_t id) const {
 }
 
 template <typename... Args>
-inline ssize_t Stream::write_format(const char *fmt, const Args &... args) {
+inline ssize_t Stream::write_format(const char *fmt, const Args &...args) {
   const auto bufsiz = 2048;
   std::array<char, bufsiz> buf;
 
@@ -1670,6 +1672,10 @@ void parse_query_text(const std::string &s, Params &params);
 bool parse_range_header(const std::string &s, Ranges &ranges);
 
 int close_socket(socket_t sock);
+
+ssize_t send_socket(socket_t sock, const void *ptr, size_t size, int flags);
+
+ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags);
 
 enum class EncodingType { None = 0, Gzip, Brotli };
 
@@ -2189,6 +2195,34 @@ template <typename T> inline ssize_t handle_EINTR(T fn) {
   return res;
 }
 
+inline ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags) {
+  return handle_EINTR([&]() {
+    return recv(sock,
+#ifdef _WIN32
+                static_cast<char *>(ptr),
+                static_cast<int>(size),
+#else
+                ptr,
+                size,
+#endif
+                flags);
+  });
+}
+
+inline ssize_t send_socket(socket_t sock, const void *ptr, size_t size, int flags) {
+  return handle_EINTR([&]() {
+    return send(sock,
+#ifdef _WIN32
+                static_cast<const char *>(ptr),
+                static_cast<int>(size),
+#else
+                ptr,
+                size,
+#endif
+                flags);
+  });
+}
+
 inline ssize_t select_read(socket_t sock, time_t sec, time_t usec) {
 #ifdef CPPHTTPLIB_USE_POLL
   struct pollfd pfd_read;
@@ -2313,6 +2347,12 @@ private:
   time_t read_timeout_usec_;
   time_t write_timeout_sec_;
   time_t write_timeout_usec_;
+
+  std::vector<char> read_buff_;
+  size_t read_buff_off_ = 0;
+  size_t read_buff_content_size_ = 0;
+
+  static const size_t read_buff_size_ = 1024 * 4;
 };
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
@@ -2860,10 +2900,10 @@ inline bool gzip_compressor::compress(const char *data, size_t data_length,
 
   do {
     constexpr size_t max_avail_in =
-        std::numeric_limits<decltype(strm_.avail_in)>::max();
+        (std::numeric_limits<decltype(strm_.avail_in)>::max)();
 
     strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
-        std::min(data_length, max_avail_in));
+        (std::min)(data_length, max_avail_in));
     strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
 
     data_length -= strm_.avail_in;
@@ -2919,10 +2959,10 @@ inline bool gzip_decompressor::decompress(const char *data, size_t data_length,
 
   do {
     constexpr size_t max_avail_in =
-        std::numeric_limits<decltype(strm_.avail_in)>::max();
+        (std::numeric_limits<decltype(strm_.avail_in)>::max)();
 
     strm_.avail_in = static_cast<decltype(strm_.avail_in)>(
-        std::min(data_length, max_avail_in));
+        (std::min)(data_length, max_avail_in));
     strm_.next_in = const_cast<Bytef *>(reinterpret_cast<const Bytef *>(data));
 
     data_length -= strm_.avail_in;
@@ -2933,7 +2973,14 @@ inline bool gzip_decompressor::decompress(const char *data, size_t data_length,
       strm_.avail_out = static_cast<uInt>(buff.size());
       strm_.next_out = reinterpret_cast<Bytef *>(buff.data());
 
+      auto prev_avail_in = strm_.avail_in;
+
       ret = inflate(&strm_, Z_NO_FLUSH);
+
+      if (prev_avail_in - strm_.avail_in == 0) {
+        return false;
+      }
+
       assert(ret != Z_STREAM_ERROR);
       switch (ret) {
       case Z_NEED_DICT:
@@ -3957,17 +4004,15 @@ template <typename CTX, typename Init, typename Update, typename Final>
 inline std::string message_digest(const std::string &s, Init init,
                                   Update update, Final final,
                                   size_t digest_length) {
-  using namespace std;
-
   std::vector<unsigned char> md(digest_length, 0);
   CTX ctx;
   init(&ctx);
   update(&ctx, s.data(), s.size());
   final(md.data(), &ctx);
 
-  stringstream ss;
+  std::stringstream ss;
   for (auto c : md) {
-    ss << setfill('0') << setw(2) << hex << (unsigned int)c;
+    ss << std::setfill('0') << std::setw(2) << std::hex << (unsigned int)c;
   }
   return ss.str();
 }
@@ -4035,45 +4080,55 @@ inline std::pair<std::string, std::string> make_digest_authentication_header(
     const Request &req, const std::map<std::string, std::string> &auth,
     size_t cnonce_count, const std::string &cnonce, const std::string &username,
     const std::string &password, bool is_proxy = false) {
-  using namespace std;
-
-  string nc;
+  std::string nc;
   {
-    stringstream ss;
-    ss << setfill('0') << setw(8) << hex << cnonce_count;
+    std::stringstream ss;
+    ss << std::setfill('0') << std::setw(8) << std::hex << cnonce_count;
     nc = ss.str();
   }
 
-  auto qop = auth.at("qop");
-  if (qop.find("auth-int") != std::string::npos) {
-    qop = "auth-int";
-  } else {
-    qop = "auth";
+  std::string qop;
+  if (auth.find("qop") != auth.end()) {
+    qop = auth.at("qop");
+    if (qop.find("auth-int") != std::string::npos) {
+      qop = "auth-int";
+    } else if (qop.find("auth") != std::string::npos) {
+      qop = "auth";
+    } else {
+      qop.clear();
+    }
   }
 
   std::string algo = "MD5";
   if (auth.find("algorithm") != auth.end()) { algo = auth.at("algorithm"); }
 
-  string response;
+  std::string response;
   {
-    auto H = algo == "SHA-256"
-                 ? detail::SHA_256
-                 : algo == "SHA-512" ? detail::SHA_512 : detail::MD5;
+    auto H = algo == "SHA-256"   ? detail::SHA_256
+             : algo == "SHA-512" ? detail::SHA_512
+                                 : detail::MD5;
 
     auto A1 = username + ":" + auth.at("realm") + ":" + password;
 
     auto A2 = req.method + ":" + req.path;
     if (qop == "auth-int") { A2 += ":" + H(req.body); }
 
-    response = H(H(A1) + ":" + auth.at("nonce") + ":" + nc + ":" + cnonce +
-                 ":" + qop + ":" + H(A2));
+    if (qop.empty()) {
+      response = H(H(A1) + ":" + auth.at("nonce") + ":" + H(A2));
+    } else {
+      response = H(H(A1) + ":" + auth.at("nonce") + ":" + nc + ":" + cnonce +
+                   ":" + qop + ":" + H(A2));
+    }
   }
 
-  auto field = "Digest username=\"" + username + "\", realm=\"" +
-               auth.at("realm") + "\", nonce=\"" + auth.at("nonce") +
-               "\", uri=\"" + req.path + "\", algorithm=" + algo +
-               ", qop=" + qop + ", nc=\"" + nc + "\", cnonce=\"" + cnonce +
-               "\", response=\"" + response + "\"";
+  auto field =
+      "Digest username=\"" + username + "\", realm=\"" + auth.at("realm") +
+      "\", nonce=\"" + auth.at("nonce") + "\", uri=\"" + req.path +
+      "\", algorithm=" + algo +
+      (qop.empty() ? ", response=\""
+                   : ", qop=" + qop + ", nc=\"" + nc + "\", cnonce=\"" +
+                         cnonce + "\", response=\"") +
+      response + "\"";
 
   auto key = is_proxy ? "Proxy-Authorization" : "Authorization";
   return std::make_pair(key, field);
@@ -4360,7 +4415,8 @@ inline SocketStream::SocketStream(socket_t sock, time_t read_timeout_sec,
     : sock_(sock), read_timeout_sec_(read_timeout_sec),
       read_timeout_usec_(read_timeout_usec),
       write_timeout_sec_(write_timeout_sec),
-      write_timeout_usec_(write_timeout_usec) {}
+      write_timeout_usec_(write_timeout_usec),
+      read_buff_(read_buff_size_, 0) {}
 
 inline SocketStream::~SocketStream() {}
 
@@ -4373,31 +4429,56 @@ inline bool SocketStream::is_writable() const {
 }
 
 inline ssize_t SocketStream::read(char *ptr, size_t size) {
+#ifdef _WIN32
+  size = (std::min)(size, static_cast<size_t>((std::numeric_limits<int>::max)()));
+#else
+  size = (std::min)(size, static_cast<size_t>((std::numeric_limits<ssize_t>::max)()));
+#endif
+
+  if (read_buff_off_ < read_buff_content_size_) {
+    auto remaining_size = read_buff_content_size_ - read_buff_off_;
+    if (size <= remaining_size) {
+      memcpy(ptr, read_buff_.data() + read_buff_off_, size);
+      read_buff_off_ += size;
+      return static_cast<ssize_t>(size);
+    } else {
+      memcpy(ptr, read_buff_.data() + read_buff_off_, remaining_size);
+      read_buff_off_ += remaining_size;
+      return static_cast<ssize_t>(remaining_size);
+    }
+  }
+
   if (!is_readable()) { return -1; }
 
-#ifdef _WIN32
-  if (size > static_cast<size_t>((std::numeric_limits<int>::max)())) {
-    return -1;
+  read_buff_off_ = 0;
+  read_buff_content_size_ = 0;
+
+  if (size < read_buff_size_) {
+    auto n = read_socket(sock_, read_buff_.data(), read_buff_size_, CPPHTTPLIB_RECV_FLAGS);
+    if (n <= 0) {
+      return n;
+    } else if (n <= static_cast<ssize_t>(size)) {
+      memcpy(ptr, read_buff_.data(), static_cast<size_t>(n));
+      return n;
+    } else {
+      memcpy(ptr, read_buff_.data(), size);
+      read_buff_off_ = size;
+      read_buff_content_size_ = static_cast<size_t>(n);
+      return static_cast<ssize_t>(size);
+    }
+  } else {
+    return read_socket(sock_, ptr, size, CPPHTTPLIB_RECV_FLAGS);
   }
-  return recv(sock_, ptr, static_cast<int>(size), CPPHTTPLIB_RECV_FLAGS);
-#else
-  return handle_EINTR(
-      [&]() { return recv(sock_, ptr, size, CPPHTTPLIB_RECV_FLAGS); });
-#endif
 }
 
 inline ssize_t SocketStream::write(const char *ptr, size_t size) {
   if (!is_writable()) { return -1; }
 
 #ifdef _WIN32
-  if (size > static_cast<size_t>((std::numeric_limits<int>::max)())) {
-    return -1;
-  }
-  return send(sock_, ptr, static_cast<int>(size), CPPHTTPLIB_SEND_FLAGS);
-#else
-  return handle_EINTR(
-      [&]() { return send(sock_, ptr, size, CPPHTTPLIB_SEND_FLAGS); });
+  size = (std::min)(size, static_cast<size_t>((std::numeric_limits<int>::max)()));
 #endif
+
+  return send_socket(sock_, ptr, size, CPPHTTPLIB_SEND_FLAGS);
 }
 
 inline void SocketStream::get_remote_ip_and_port(std::string &ip,
@@ -4922,7 +5003,7 @@ inline bool Server::read_content_core(Stream &strm, Request &req, Response &res,
       /* For debug
       size_t pos = 0;
       while (pos < n) {
-        auto read_size = std::min<size_t>(1, n - pos);
+        auto read_size = (std::min)<size_t>(1, n - pos);
         auto ret = multipart_form_data_parser.parse(
             buf + pos, read_size, multipart_receiver, mulitpart_header);
         if (!ret) { return false; }
@@ -5941,7 +6022,12 @@ inline bool ClientImpl::write_request(Stream &strm, Request &req,
     return write_content_with_provider(strm, req, error);
   }
 
-  return detail::write_data(strm, req.body.data(), req.body.size());
+  if (!detail::write_data(strm, req.body.data(), req.body.size())) {
+    error = Error::Write;
+    return false;
+  }
+
+  return true;
 }
 
 inline std::unique_ptr<Response> ClientImpl::send_with_content_provider(

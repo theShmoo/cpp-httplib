@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 #define SERVER_CERT_FILE "./cert.pem"
 #define SERVER_CERT2_FILE "./cert2.pem"
@@ -38,6 +39,11 @@ MultipartFormData &get_file_value(MultipartFormDataItems &files,
       [&](const MultipartFormData &file) { return file.name == key; });
   if (it != files.end()) { return *it; }
   throw std::runtime_error("invalid mulitpart form data name error");
+}
+
+TEST(ConstructorTest, MoveConstructible) {
+  EXPECT_FALSE(std::is_copy_constructible<Client>::value);
+  EXPECT_TRUE(std::is_nothrow_move_constructible<Client>::value);
 }
 
 #ifdef _WIN32
@@ -971,8 +977,15 @@ TEST(RedirectFromPageWithContentIP6, Redirect) {
 
   auto th = std::thread([&]() { svr.listen("::1", 1234); });
 
-  while (!svr.is_running()) {
+  // When IPV6 support isn't available svr.listen("::1", 1234) never
+  // actually starts anything, so the condition !svr.is_running() will
+  // always remain true, and the loop never stops.
+  // This basically counts how many milliseconds have passed since the
+  // call to svr.listen(), and if after 5 seconds nothing started yet
+  // aborts the test.
+  for (unsigned int milliseconds = 0; !svr.is_running(); milliseconds++) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_LT(milliseconds, 5000U);
   }
 
   // Give GET time to get a few messages.
@@ -1349,11 +1362,13 @@ protected:
                std::this_thread::sleep_for(std::chrono::seconds(2));
                res.set_content("slow", "text/plain");
              })
+#if 0
         .Post("/slowpost",
               [&](const Request & /*req*/, Response &res) {
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 res.set_content("slow", "text/plain");
               })
+#endif
         .Get("/remote_addr",
              [&](const Request &req, Response &res) {
                auto remote_addr = req.headers.find("REMOTE_ADDR")->second;
@@ -2623,6 +2638,7 @@ TEST_F(ServerTest, SlowRequest) {
       std::thread([=]() { auto res = cli_.Get("/slow"); }));
 }
 
+#if 0
 TEST_F(ServerTest, SlowPost) {
   char buffer[64 * 1024];
   memset(buffer, 0x42, sizeof(buffer));
@@ -2656,6 +2672,7 @@ TEST_F(ServerTest, SlowPostFail) {
   ASSERT_TRUE(!res);
   EXPECT_EQ(Error::Write, res.error());
 }
+#endif
 
 TEST_F(ServerTest, Put) {
   auto res = cli_.Put("/put", "PUT", "text/plain");
@@ -3562,10 +3579,12 @@ TEST(StreamingTest, NoContentLengthStreaming) {
   Client client(HOST, PORT);
 
   auto get_thread = std::thread([&client]() {
-    auto res = client.Get("/stream", [](const char *data, size_t len) -> bool {
-      EXPECT_EQ("aaabbb", std::string(data, len));
+    std::string s;
+    auto res = client.Get("/stream", [&s](const char *data, size_t len) -> bool {
+      s += std::string(data, len);
       return true;
     });
+    EXPECT_EQ("aaabbb", s);
   });
 
   // Give GET time to get a few messages.
